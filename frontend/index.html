@@ -22,7 +22,7 @@
   .seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .seg button{border:0;background:transparent;padding:9px 12px;cursor:pointer}
   .seg button.on{background:var(--blue);color:#fff}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
+  .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
   .card h3{margin:0;font-size:12px;color:#64748b;font-weight:500}
   .card strong{display:block;font-family:"Segoe UI",system-ui,sans-serif;font-size:28px;margin-top:6px}
@@ -58,12 +58,13 @@ createApp({
     const token=ref(localStorage.getItem('lagboard_token')||'');
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const sources=ref([]), arrivals=ref([]), catchups=ref([]), audit=ref([]), watermark=ref({}), tasks=ref([]);
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐/审计'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
+    function cutText(name){const t=(tasks.value||[]).find(x=>x.source===name);return t?(t.freeze_cut?'已切断 · 拒写':'放行'):'—';}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -88,17 +89,27 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const au=await loadJson('/api/freeze-audit'); if(au===null) return;
+      audit.value=Array.isArray(au.items)?au.items:[];
+      const t=await loadJson('/api/tasks'); if(t===null) return;
+      tasks.value=Array.isArray(t.items)?t.items:[];
+      const w=await loadJson('/api/watermark'); if(w===null) return;
+      watermark.value=w||{};
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
     }
     async function recordArrival(){
       actionErr.value='';
       const r=await fetch('/api/arrivals',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):(j.detail||'失败');
+      const j=await r.json();
+      actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`)
+        :(j.code==='FREEZE_REFUSED'?`冻写切断 · 拒写已审计 · 正式零增（${j.detail}）`
+        :(j.code==='FREEZE_CONTENTION'?`冻写争用 · 后交不落库（${j.detail}）`
+        :(j.detail||'失败')));
       await refresh();
     }
     async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,audit,watermark,tasks,form,actionErr,frozen,degraded,modeClass,cutText,login,logout,recordArrival,doCatchup};
   },
   template:`
   <div v-if="!token" class="login">
@@ -126,6 +137,8 @@ createApp({
         <div class="card"><h3>源数量</h3><strong>{{sources.length}}</strong></div>
         <div class="card"><h3>冻结中</h3><strong>{{frozen}}</strong></div>
         <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
+        <div class="card"><h3>拒写</h3><strong>{{watermark.freeze_refused||0}}</strong></div>
+        <div class="card"><h3>冻写争用</h3><strong>{{watermark.freeze_contention||0}}</strong></div>
       </div>
       <div class="card" v-show="tab===0">
         <h3 style="margin-bottom:8px">登记到达</h3>
@@ -146,9 +159,10 @@ createApp({
       <div class="card" v-show="tab===1">
         <h3>分级规则</h3>
         <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。</p>
-        <table><thead><tr><th>源</th><th>SLA</th><th>输出态</th><th></th></tr></thead>
+        <table><thead><tr><th>源</th><th>SLA</th><th>输出态</th><th>入库口径</th><th></th></tr></thead>
         <tbody><tr v-for="s in sources" :key="'g'+s.id">
           <td>{{s.name}}</td><td>{{s.sla_minutes}}</td><td>{{s.output_mode}}</td>
+          <td>{{cutText(s.name)}}</td>
           <td><button class="ghost" @click="doCatchup(s.name)">补齐恢复</button></td>
         </tr></tbody></table>
       </div>
@@ -156,6 +170,12 @@ createApp({
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+        <h3 style="margin-top:16px">冻写切断审计</h3>
+        <p style="color:#64748b;font-size:13px">冻结未补齐前，入库经同一到达登记入口整笔锁行拒插，正式到达零增；双席同时打冻结源，后交只记冻写争用。</p>
+        <table><thead><tr><th>时间</th><th>源</th><th>动作</th><th>席位</th><th>说明</th></tr></thead>
+        <tbody><tr v-for="x in audit" :key="'a'+x.id">
+          <td>{{x.created_at}}</td><td>{{x.source}}</td><td>{{x.action}}</td><td>{{x.seat}}</td><td>{{x.detail}}</td>
+        </tr></tbody></table>
       </div>
     </main>
   </div>`

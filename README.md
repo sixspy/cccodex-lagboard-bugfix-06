@@ -32,6 +32,20 @@
 - 补齐整源解冻 vs 按业务日窗口解冻
 - 只认源时钟 vs 双时钟取严
 
+## 冻写切断（本仓已钉死）
+
+冻结徽标仍亮时，冻结源报文不得再入正式到达流水。切断口径与封档见
+[`docs/冻写切断卡.md`](docs/冻写切断卡.md)（甲路径：整笔锁行拒插 + 审计 + 正式零增）。
+
+- 入口：沿用「时限台 → 到达登记」菜单，不另建冻写台；登录沿用冻写侧会话。
+- 库文件挂冻写专卷：compose 卷 `lagboard-freeze-data:/app/data`。
+- 失败测：`tests/test_freeze_write_cut.py`（拒写零增、五处同拒、双席争用留痕、偏离卡驳回）。
+- 复现脚本：`python scripts/repro_freeze_ingest.py`。
+- 封档：`python scripts/seal_freeze_card.py`（仅钉死当天，改口须 `--force` 并说明）。
+
+相关接口：`POST /api/arrivals`（冻结源返回 423）、`GET /api/freeze-audit`、
+`GET /api/tasks`、`GET /api/watermark`。
+
 ## 启动（一键）
 
 `powershell
